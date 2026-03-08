@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import altair as alt
 from datetime import datetime
+from streamlit_gsheets import GSheetsConnection
 
 # --- 1. CONFIGURAÇÃO DE DESIGN ---
 st.set_page_config(page_title="CFO Hub | Inteligência Financeira", layout="wide")
@@ -16,7 +17,19 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. ESTRUTURA DE CATEGORIAS ---
+# --- 2. CONEXÃO COM GOOGLE SHEETS ---
+# Esta conexão busca automaticamente as credenciais no seu arquivo secrets.toml
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+def carregar_dados_cloud():
+    try:
+        # ttl=0 garante que ele busque dados novos sempre que a página atualizar
+        return conn.read(ttl=0)
+    except:
+        # Se a planilha estiver vazia, retorna estrutura básica
+        return pd.DataFrame(columns=["Data Registro", "Cenário", "Receita Total", "Resultado Liq", "Venda Mensal"])
+
+# --- 3. ESTRUTURA DE CATEGORIAS ---
 ESTRUTURA = {
     "Pessoal": ["Folha CLT", "Folha PJ", "Outras Pessoal", "Bonus/Dividendos"],
     "Administrativas": ["Aluguel", "Condomínio e IPTU", "Conselho", "Materiais e Limpeza", "Vagas Garagem sócios", "Viagem e Hospedagem", "Manutenções", "Desp. De representação", "Outras adm"],
@@ -47,7 +60,7 @@ with tab_simulador:
                 soma += v
             gastos_por_cat[cat] = soma
 
-    # Lógica de Cálculo
+    # --- Lógica de Cálculo (Fluxo de Caixa) ---
     datas = pd.date_range(start="2026-03-01", end="2026-06-30", freq="MS")
     rec_mes = {d.strftime("%m/%Y"): 0.0 for d in datas}
 
@@ -71,22 +84,41 @@ with tab_simulador:
 
     df_dre = pd.DataFrame(dados_dre).set_index("Mês").T
 
-    # --- MÉTRICAS COM CORES DINÂMICAS ---
+    # --- MÉTRICAS ---
     t_rec = df_dre.loc["(+) RECEITA (CAIXA)"].sum()
     t_luc = df_dre.loc["(=) RESULTADO LÍQUIDO"].sum()
     
     col_m1, col_m2, col_m3 = st.columns(3)
     col_m1.metric("Receita Total Projetada", f"R$ {t_rec:,.2f}")
-    
-    # Cor do Saldo Final
     cor_saldo = "normal" if t_luc >= 0 else "inverse"
-    col_m2.metric("Resultado Líquido Acumulado", f"R$ {t_luc:,.2f}", delta=f"{((t_luc/t_rec)*100 if t_rec > 0 else 0):.1f}% (Margem)", delta_color=cor_saldo)
+    col_m2.metric("Resultado Líquido Acumulado", f"R$ {t_luc:,.2f}", 
+                  delta=f"{((t_luc/t_rec)*100 if t_rec > 0 else 0):.1f}% (Margem)", delta_color=cor_saldo)
     col_m3.metric("Ponto de Equilíbrio (Média)", f"R$ {abs(t_rec - t_luc)/len(datas):,.2f}/mês")
 
+    # --- SEÇÃO DE SALVAMENTO ---
     st.divider()
-    
-    # --- TABELA DRE COM FORMATAÇÃO CONDICIONAL ---
-    st.subheader("📑 Demonstrativo de Resultado (DRE)")
+    col_input, col_btn = st.columns([3, 1])
+    with col_input:
+        nome_cenario = st.text_input("Dê um nome para este registro (ex: Plano A):", placeholder="Ex: Investimento Marketing Março")
+    with col_btn:
+        st.write(" ") # Alinhamento
+        if st.button("💾 Salvar na Nuvem", use_container_width=True):
+            with st.spinner("Enviando dados para o Google Sheets..."):
+                df_existente = carregar_dados_cloud()
+                novo_dado = pd.DataFrame([{
+                    "Data Registro": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "Cenário": nome_cenario,
+                    "Receita Total": round(t_rec, 2),
+                    "Resultado Liq": round(t_luc, 2),
+                    "Venda Mensal": venda_mensal
+                }])
+                df_atualizado = pd.concat([df_existente, novo_dado], ignore_index=True)
+                conn.update(data=df_atualizado)
+                st.toast("Dados salvos com sucesso!", icon="✅")
+                st.rerun()
+
+    # --- TABELA DRE ---
+    st.subheader("📑 Demonstrativo de Resultado (DRE) Atual")
     
     def color_negative_red(val):
         if isinstance(val, (int, float)):
@@ -101,46 +133,32 @@ with tab_simulador:
         , use_container_width=True
     )
 
+    # --- HISTÓRICO COMPARTILHADO ---
+    st.divider()
+    st.subheader("📜 Registros Salvos no Google Sheets")
+    historico = carregar_dados_cloud()
+    if not historico.empty:
+        st.dataframe(historico.sort_index(ascending=False), use_container_width=True)
+    else:
+        st.info("Ainda não há registros salvos na planilha compartilhada.")
+
 # =====================================================
-# ABA 2: MANUAL DIDÁTICO (PERFEIÇÃO VISUAL)
+# ABA 2: MANUAL DIDÁTICO
 # =====================================================
 with tab_didatica:
     st.title("📚 Guia de Utilização do Sistema")
     st.write("Entenda os conceitos financeiros aplicados neste simulador para uma gestão de alta performance.")
-    
     st.markdown("---")
-
-    # --- CARD: EXEMPLO PRÁTICO ---
     st.subheader("🎯 O Efeito Escada no Fluxo de Caixa")
     st.success("""
-    **Exemplo Prático de Parcelamento:** Imagine que você realizou uma venda de **R$ 10.000,00** em Março, parcelada em **4 vezes**. No regime de caixa, esse valor não entra integralmente de uma só vez:
-    
-    * **Março:** R$ 2.500,00  
-    * **Abril:** R$ 2.500,00 (da venda de Março) + parcela da venda de Abril  
-    * **Maio:** R$ 2.500,00 (da venda de Março) + parcelas das vendas anteriores...
-    
-    O gráfico de evolução mostrará o faturamento subindo em **'degraus'** a cada mês. Esse crescimento gradual ocorre até que o sistema atinja o **platô**, momento em que o volume de parcelas antigas se estabiliza com as novas.
+    **Exemplo Prático de Parcelamento:** Se você vende R$ 10.000 em 4x, o dinheiro entra em 'escada'.
+    O sistema projeta exatamente essa entrada real de caixa, não apenas a promessa de venda.
     """)
     
-
-    # --- SEÇÃO DE CONCEITOS ---
     col_c1, col_c2 = st.columns(2)
-    
     with col_c1:
-        st.info("### 📋 Regime de Caixa\nÉ o registro dos eventos financeiros no momento em que o dinheiro **entra ou sai** efetivamente da conta bancária. É a visão real da sobrevivência financeira da empresa.")
-    
+        st.info("### 📋 Regime de Caixa\nÉ o registro do dinheiro quando ele realmente entra ou sai da conta.")
     with col_c2:
-        st.warning("### 📈 Margem Líquida\nIndica qual porcentagem de cada real vendido restou após o pagamento de todas as despesas. É o principal indicador de eficiência operacional.")
-
-    # --- DETALHAMENTO DE CATEGORIAS ---
-    st.markdown("### 🗂️ Estrutura de Contas")
-    with st.expander("💼 **Gestão de Pessoal**"):
-        st.write("Engloba todos os custos diretos e indiretos com a equipe, incluindo salários CLT, contratos PJ, premiações e a distribuição de dividendos aos sócios.")
-
-    with st.expander("🏠 **Despesas Administrativas**"):
-        st.write("Custos fixos necessários para manter a estrutura física e jurídica, como aluguéis, taxas de conselho, softwares de gestão e manutenções preventivas.")
-
-    with st.expander("📣 **Marketing e Crescimento**"):
-        st.write("Investimentos destinados à aquisição de novos clientes, patrocínios de eventos e campanhas digitais.")
+        st.warning("### 📈 Margem Líquida\nQuanto sobra do faturamento após pagar todas as despesas.")
 
 st.markdown('<div style="text-align: center; color: #bdc3c7; padding: 20px;">CFO Hub Intelligence © 2026 | Desenvolvido para Alta Performance</div>', unsafe_allow_html=True)
